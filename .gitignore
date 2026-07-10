@@ -1,3 +1,4 @@
 dht
+dht-sidecar
 *.log
 temp/

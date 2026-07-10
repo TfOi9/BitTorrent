@@ -12,7 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"dht/bridge"
 	"dht/node"
+	pb "dht/proto"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
 func execCmd(n node.DhtNode, line string, w io.Writer) {
@@ -65,6 +70,7 @@ func main() {
 	join := flag.String("join", "", "address of existing node to join")
 	addr := flag.String("addr", "127.0.0.1", "address to advertise to other nodes")
 	cmdPort := flag.Int("cmd-port", 0, "port for CLI commands over TCP (0 to disable)")
+	grpcPort := flag.Int("grpc-port", 0, "port for gRPC server (0 to disable)")
 	flag.Parse()
 
 	node.SetLocalAddress(*addr)
@@ -90,6 +96,12 @@ func main() {
 		go startCmdServer(n, *cmdPort)
 	}
 
+	// Start gRPC server if a port is specified.
+	var grpcServer *grpc.Server
+	if *grpcPort > 0 {
+		grpcServer = startGRPCServer(n, *grpcPort)
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
 
@@ -107,10 +119,24 @@ func main() {
 		select {
 		case <-sig:
 			fmt.Println("received interrupt")
+			if grpcServer != nil {
+				grpcServer.GracefulStop()
+			}
 			n.Quit()
 			return
 		case line, ok := <-cmdCh:
 			if !ok {
+				// stdin closed (e.g., running as daemon).
+				// If gRPC is active, keep serving; otherwise exit.
+				if grpcServer != nil {
+					fmt.Println("stdin closed, running in headless mode (Ctrl-C to stop)")
+					// Block until signal.
+					<-sig
+					fmt.Println("received interrupt")
+					grpcServer.GracefulStop()
+					n.Quit()
+					return
+				}
 				n.Quit()
 				return
 			}
@@ -138,4 +164,29 @@ func startCmdServer(n node.DhtNode, port int) {
 			}
 		}(conn)
 	}
+}
+
+// startGRPCServer creates and starts a gRPC server on the given port,
+// serving the DhtService API. It returns the server handle for graceful shutdown.
+func startGRPCServer(n node.DhtNode, port int) *grpc.Server {
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gRPC server listen error: %v\n", err)
+		return nil
+	}
+
+	srv := grpc.NewServer()
+	dhtSrv := bridge.NewDhtServer(n)
+	pb.RegisterDhtServiceServer(srv, dhtSrv)
+
+	// Enable server reflection for debugging with grpcurl.
+	reflection.Register(srv)
+
+	fmt.Printf("gRPC server listening on :%d\n", port)
+	go func() {
+		if err := srv.Serve(lis); err != nil {
+			fmt.Fprintf(os.Stderr, "gRPC server error: %v\n", err)
+		}
+	}()
+	return srv
 }
