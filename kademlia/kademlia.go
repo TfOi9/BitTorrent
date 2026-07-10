@@ -101,9 +101,14 @@ func (node *KademliaNode) Run(wg *sync.WaitGroup) {
 	node.server.Register(node)
 
 	var err error
-	node.listener, err = net.Listen("tcp", node.Addr)
+	// Listen on all interfaces (0.0.0.0) at the port extracted from the
+	// advertised address. The advertised address (node.Addr) is still used
+	// for NodeID generation and shared with other peers — but the socket
+	// must accept connections from any network interface for cross-machine use.
+	_, port, _ := net.SplitHostPort(node.Addr)
+	node.listener, err = net.Listen("tcp", ":"+port)
 	if err != nil {
-		logrus.Errorf("[%s] Failed to listen on %s: %v", node.Addr, node.Addr, err)
+		logrus.Errorf("[%s] Failed to listen on :%s: %v", node.Addr, port, err)
 		wg.Done()
 		return
 	}
