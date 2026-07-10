@@ -9,13 +9,20 @@ import (
 )
 
 // Put stores a key-value pair in the DHT
-// Store the pair in the K-closest nodes from the target
+// Store the pair in the K-closest nodes from the target, and also locally
+// so that the writing node always reflects the latest value it wrote.
 func (node *KademliaNode) Put(key string, value string) bool {
 	logrus.Infof("[%s] Putting key: %s, value: %s", node.Addr, key, value)
 
 	keyID := hash(key)
 
-	success := 0
+	// Store locally FIRST so that a subsequent Get on this node
+	// returns the latest value, even before remote stores complete.
+	node.dataLock.Lock()
+	node.data[key] = value
+	node.dataLock.Unlock()
+
+	success := 1 // count the local store as one success
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
@@ -142,8 +149,14 @@ func (node *KademliaNode) Get(key string) (bool, string) {
 	return false, ""
 }
 
-// Cache values in the K closest nodes to the keyID
+// Cache values in the K closest nodes to the keyID, including locally,
+// so that subsequent Gets on this node are served from local cache.
 func (node *KademliaNode) cacheValue(key, value string, keyID [IDLength]byte) {
+	// Store locally first.
+	node.dataLock.Lock()
+	node.data[key] = value
+	node.dataLock.Unlock()
+
 	closest := node.findNode(keyID)
 
 	for _, c := range closest {
