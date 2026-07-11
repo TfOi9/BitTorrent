@@ -1,4 +1,5 @@
-dht
 dht-sidecar
+impl_docs/
 *.log
 temp/
+*/target/

@@ -1,0 +1,39 @@
+[package]
+name = "backend"
+version = "0.1.0"
+edition = "2024"
+description = "BitTorrent P2P downloader backend"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+sha1 = { version = "0.10", features = ["asm"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+bytes = "1"
+reqwest = { version = "0.12", features = ["rustls-tls"] }
+tonic = "0.12"
+prost = "0.13"
+url = "2"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+log = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
