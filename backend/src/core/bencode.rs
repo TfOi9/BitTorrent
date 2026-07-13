@@ -71,6 +71,13 @@ impl BencodeValue {
         }
     }
 
+    pub fn as_list(&self) -> Option<&[BencodeValue]> {
+        match self {
+            BencodeValue::List(items) => Some(items),
+            _ => None,
+        }
+    }
+
     fn parse_value(input: &[u8], pos: &mut usize) -> Result<Self> {
         match input.get(*pos) {
             Some(b'i') => Self::parse_integer(input, pos),
