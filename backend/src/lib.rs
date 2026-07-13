@@ -5,6 +5,10 @@ pub mod peer;
 pub mod storage;
 pub mod session;
 
+pub(crate) mod dht_proto {
+    include!("generated/dht.rs");
+}
+
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }

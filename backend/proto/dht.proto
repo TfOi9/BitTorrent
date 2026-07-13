@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package dht;
+
+option go_package = "dht/proto";
+
+// DhtService exposes the Kademlia DHT operations to external clients
+// (e.g., a Rust/C++ BitTorrent client) via gRPC.
+service DhtService {
+  // Put stores a key-value pair in the DHT.
+  rpc Put(PutRequest) returns (PutResponse);
+
+  // Get retrieves a value by key from the DHT.
+  rpc Get(GetRequest) returns (GetResponse);
+
+  // Delete removes a key-value pair from the DHT.
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // GetPeers finds peers for a given info_hash.
+  // Returns peers if known, otherwise returns closest DHT nodes.
+  rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
+
+  // AnnouncePeer registers the caller as a downloader/seeder for an info_hash.
+  rpc AnnouncePeer(AnnouncePeerRequest) returns (AnnouncePeerResponse);
+}
+
+// ── Put ──────────────────────────────────────────────────────────
+
+message PutRequest {
+  string key   = 1;
+  string value = 2;
+}
+
+message PutResponse {
+  bool success = 1;
+}
+
+// ── Get ──────────────────────────────────────────────────────────
+
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  bool   found = 1;
+  string value = 2;
+}
+
+// ── Delete ───────────────────────────────────────────────────────
+
+message DeleteRequest {
+  string key = 1;
+}
+
+message DeleteResponse {
+  bool success = 1;
+}
+
+// ── Peer ─────────────────────────────────────────────────────────
+
+// Peer represents a BitTorrent peer (IP + port).
+message Peer {
+  string ip   = 1; // "x.x.x.x" (IPv4) or "x:x:...:x" (IPv6)
+  uint32 port = 2; // 1–65535
+}
+
+// ── GetPeers ─────────────────────────────────────────────────────
+
+message GetPeersRequest {
+  bytes info_hash = 1; // 20-byte SHA1 info_hash (raw binary)
+}
+
+message GetPeersResponse {
+  repeated Peer peers = 1;
+  bool          found = 2;
+}
+
+// ── AnnouncePeer ─────────────────────────────────────────────────
+//
+// Token-based Sybil protection is handled internally by the DHT layer.
+// The caller does not need to manage tokens.
+
+message AnnouncePeerRequest {
+  bytes info_hash = 1;
+  Peer  peer      = 2;
+}
+
+message AnnouncePeerResponse {
+  bool success = 1;
+}
