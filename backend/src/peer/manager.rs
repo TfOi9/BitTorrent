@@ -1,5 +1,5 @@
 use tokio::sync::mpsc;
-use crate::core::types::PeerAddr;
+use crate::core::types::{PeerAddr, PeerId};
 use crate::peer::connection::PeerContext;
 use crate::peer::message::Message;
 
@@ -11,7 +11,7 @@ pub enum PeerCommand {
 
 #[derive(Debug)]
 pub enum PeerEvent {
-    ReceivedMessage(Message),
+    ReceivedMessage { peer_id: PeerId, msg: Message },
     Disconnected(PeerAddr),
     HandshakeComplete(PeerContext),
 }

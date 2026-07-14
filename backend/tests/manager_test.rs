@@ -1,6 +1,6 @@
 use backend::peer::manager::{PeerCommand, PeerEvent, PeerHandle};
 use backend::peer::message::Message;
-use backend::core::types::PeerAddr;
+use backend::core::types::{PeerAddr, PeerId};
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc;
 
@@ -14,7 +14,10 @@ fn test_peer_command_debug() {
 
 #[test]
 fn test_peer_event_debug() {
-    let event = PeerEvent::ReceivedMessage(Message::Have(42));
+    let event = PeerEvent::ReceivedMessage {
+        peer_id: PeerId::new_random(),
+        msg: Message::Have(42),
+    };
     assert!(format!("{:?}", event).contains("Have"));
     let addr = PeerAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6881);
     let event = PeerEvent::Disconnected(addr.clone());
