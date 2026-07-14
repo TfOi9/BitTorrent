@@ -78,14 +78,17 @@ fn test_session_config_defaults() {
 
 #[test]
 fn test_session_config_custom() {
+    let bind_addr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
     let config = SessionConfig {
         dht_endpoint: "http://192.168.1.1:6000".into(),
+        bind_addr,
         peer_port: 9999,
         max_peers: 10,
         pipeline_depth: 3,
         dht_refresh_interval_secs: 60,
     };
     assert_eq!(config.dht_endpoint, "http://192.168.1.1:6000");
+    assert_eq!(config.bind_addr, bind_addr);
     assert_eq!(config.peer_port, 9999);
     assert_eq!(config.max_peers, 10);
     assert_eq!(config.pipeline_depth, 3);
@@ -170,6 +173,7 @@ async fn test_session_new_and_progress() {
     let metainfo = make_test_metainfo(2);
     let config = SessionConfig {
         dht_endpoint: "http://127.0.0.1:50051".into(),
+        bind_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         peer_port: 60001,
         max_peers: 5,
         pipeline_depth: 3,
@@ -187,6 +191,7 @@ async fn test_session_info_hash() {
     let expected_hash = metainfo.info_hash;
     let config = SessionConfig {
         dht_endpoint: "http://127.0.0.1:50051".into(),
+        bind_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         peer_port: 60003,
         max_peers: 5,
         pipeline_depth: 3,
@@ -262,6 +267,7 @@ async fn test_session_download_full_flow() {
 
     let config = SessionConfig {
         dht_endpoint: "http://127.0.0.1:50052".into(),
+        bind_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         peer_port: 60004,
         max_peers: 5,
         pipeline_depth: 3,
@@ -293,6 +299,7 @@ async fn test_session_download_without_sidecar_fails() {
     let metainfo = make_test_metainfo(1);
     let config = SessionConfig {
         dht_endpoint: "http://127.0.0.1:19999".into(),
+        bind_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         peer_port: 60002,
         max_peers: 5,
         pipeline_depth: 3,

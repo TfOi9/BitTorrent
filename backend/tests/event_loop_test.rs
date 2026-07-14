@@ -22,7 +22,7 @@ async fn test_event_loop_disconnect_on_close() {
     let peer_id = make_peer_id();
 
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         drop(stream);
     });
@@ -56,7 +56,7 @@ async fn test_event_loop_receives_message() {
     let peer_id = make_peer_id();
 
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
         let msg = Message::Have(42).encode();
         stream.writable().await.unwrap();
         stream.try_write(&msg).unwrap();
@@ -98,7 +98,7 @@ async fn test_event_loop_keep_alive() {
     let peer_id = make_peer_id();
 
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
         let keep_alive = [0u8, 0, 0, 0];
         stream.writable().await.unwrap();
         stream.try_write(&keep_alive).unwrap();
@@ -202,7 +202,7 @@ async fn test_event_loop_multiple_messages() {
 
     let _cmd_tx = cmd_tx;
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
         let mut batch = Vec::new();
         batch.extend_from_slice(&Message::Choke.encode());
         batch.extend_from_slice(&Message::Unchoke.encode());
@@ -245,7 +245,7 @@ async fn test_event_loop_incomplete_message() {
     let peer_id = make_peer_id();
 
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
         stream.writable().await.unwrap();
         stream.try_write(&[0, 0, 0, 100, 5, 0, 0, 0]).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -321,7 +321,7 @@ async fn test_event_loop_protocol_error_detected() {
     let peer_id = make_peer_id();
 
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
         stream.writable().await.unwrap();
         stream.try_write(&[0, 0, 0, 1, 99]).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;

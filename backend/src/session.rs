@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use crate::core::bitfield::Bitfield;
 use crate::core::error::{BError, Result};
 use crate::core::metainfo::Metainfo;
+use crate::core::net_util::detect_local_ip;
 use crate::core::types::{InfoHash, PeerAddr, PeerId, BLOCK_LEN};
 use crate::dht::DhtClient;
 use crate::peer::connection::PeerContext;
@@ -22,6 +23,7 @@ use crate::peer::message::Message;
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
     pub dht_endpoint: String,
+    pub bind_addr: IpAddr,
     pub peer_port: u16,
     pub max_peers: usize,
     pub pipeline_depth: usize,
@@ -32,6 +34,7 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             dht_endpoint: "http://127.0.0.1:50051".into(),
+            bind_addr: detect_local_ip(),
             peer_port: 6881,
             max_peers: 50,
             pipeline_depth: 5,
@@ -311,10 +314,7 @@ impl Session {
     }
 
     pub async fn download(&mut self) -> Result<Vec<u8>> {
-        let our_addr = PeerAddr::new(
-            IpAddr::from([127, 0, 0, 1]),
-            self.config.peer_port,
-        );
+        let our_addr = PeerAddr::new(self.config.bind_addr, self.config.peer_port);
 
         self.dht
             .announce_peer(&self.metainfo.info_hash, &our_addr)
@@ -668,10 +668,7 @@ impl Session {
     }
 
     async fn refresh_peers(&mut self) -> Result<()> {
-        let our_addr = PeerAddr::new(
-            IpAddr::from([127, 0, 0, 1]),
-            self.config.peer_port,
-        );
+        let our_addr = PeerAddr::new(self.config.bind_addr, self.config.peer_port);
 
         self.dht
             .announce_peer(&self.metainfo.info_hash, &our_addr)
