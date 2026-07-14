@@ -120,9 +120,9 @@ echo "  -> SHA1: $(cat "${TEST_DIR}/test_data.bin.sha1" 2>/dev/null || echo 'N/A
 if command -v mktorrent &> /dev/null; then
     mktorrent \
         -a "http://dummy.tracker/announce" \
-        -l 14 \
+        -l 15 \
         -o "${TEST_DIR}/test.torrent" \
-        "${TEST_FILE}" 2>/dev/null
+        "${TEST_FILE}"
     echo "  -> .torrent: ${TEST_DIR}/test.torrent"
 elif command -v transmission-create &> /dev/null; then
     transmission-create \
