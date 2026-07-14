@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,8 +18,9 @@ use crate::peer::connection::PeerContext;
 use crate::peer::connection_manager::{
     ConnectionManager, ConnectionManagerConfig,
 };
-use crate::peer::manager::{PeerEvent};
+use crate::peer::manager::PeerEvent;
 use crate::peer::message::Message;
+use crate::storage::PieceStore;
 
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
@@ -28,6 +30,7 @@ pub struct SessionConfig {
     pub max_peers: usize,
     pub pipeline_depth: usize,
     pub dht_refresh_interval_secs: u64,
+    pub upload_slots: usize,
 }
 
 impl Default for SessionConfig {
@@ -39,6 +42,7 @@ impl Default for SessionConfig {
             max_peers: 50,
             pipeline_depth: 5,
             dht_refresh_interval_secs: 300,
+            upload_slots: 4,
         }
     }
 }
@@ -49,7 +53,7 @@ enum PieceState {
         blocks: Vec<Option<Vec<u8>>>,
         received: usize,
     },
-    Complete(Vec<u8>),
+    Complete,
 }
 
 struct PieceTracker {
@@ -75,19 +79,21 @@ impl PieceTracker {
     fn is_complete(&self) -> bool {
         self.pieces
             .iter()
-            .all(|s| matches!(s, PieceState::Complete(_)))
+            .all(|s| matches!(s, PieceState::Complete))
     }
 
     fn completed_count(&self) -> usize {
         self.pieces
             .iter()
-            .filter(|s| matches!(s, PieceState::Complete(_)))
+            .filter(|s| matches!(s, PieceState::Complete))
             .count()
     }
 
     #[allow(dead_code)]
-    fn has_piece(&self, index: usize) -> bool {
-        matches!(self.pieces.get(index), Some(PieceState::Complete(_)))
+    fn set_all_complete(&mut self) {
+        for s in self.pieces.iter_mut() {
+            *s = PieceState::Complete;
+        }
     }
 
     fn increase_availability(&mut self, indexes: impl Iterator<Item = usize>) {
@@ -132,7 +138,7 @@ impl PieceTracker {
                 .iter()
                 .position(|b| b.is_none())
                 .map(|i| i as u32 * BLOCK_LEN),
-            PieceState::Complete(_) => None,
+            PieceState::Complete => None,
         }
     }
 
@@ -163,29 +169,6 @@ impl PieceTracker {
         false
     }
 
-    fn verify_and_complete(&mut self, index: u32) -> Result<Vec<u8>> {
-        let data = self.assemble(index);
-        let expected = self.metainfo.piece_hash(index as usize).ok_or_else(|| {
-            BError::Session(format!("no hash for piece {}", index))
-        })?;
-
-        let actual: [u8; 20] = sha1::Sha1::digest(&data).into();
-        if actual != *expected {
-            self.reset(index);
-            return Err(BError::Session(format!(
-                "SHA1 mismatch for piece {}",
-                index
-            )));
-        }
-
-        self.pieces[index as usize] = PieceState::Complete(data.clone());
-        Ok(data)
-    }
-
-    fn reset(&mut self, index: u32) {
-        self.pieces[index as usize] = PieceState::Pending;
-    }
-
     fn assemble(&self, index: u32) -> Vec<u8> {
         match &self.pieces[index as usize] {
             PieceState::Downloading { blocks, .. } => {
@@ -196,21 +179,29 @@ impl PieceTracker {
                 }
                 data
             }
-            PieceState::Complete(data) => data.clone(),
+            PieceState::Complete => Vec::new(),
             _ => Vec::new(),
         }
     }
 
-    fn take_data(&mut self) -> Vec<u8> {
-        let total = self.metainfo.info.total_length;
-        let mut data = Vec::with_capacity(total);
-        for piece in self.pieces.iter_mut() {
-            if let PieceState::Complete(d) = piece {
-                data.extend_from_slice(d);
-            }
+    fn verify(&self, index: u32, data: &[u8]) -> Result<()> {
+        let expected = self
+            .metainfo
+            .piece_hash(index as usize)
+            .ok_or_else(|| BError::Session(format!("no hash for piece {}", index)))?;
+
+        let actual: [u8; 20] = sha1::Sha1::digest(data).into();
+        if actual != *expected {
+            return Err(BError::Session(format!(
+                "SHA1 mismatch for piece {}",
+                index
+            )));
         }
-        data.truncate(total);
-        data
+        Ok(())
+    }
+
+    fn mark_complete(&mut self, index: u32) {
+        self.pieces[index as usize] = PieceState::Complete;
     }
 
     fn mark_inflight(&mut self, peer_id: PeerId, index: u32, begin: u32) {
@@ -251,6 +242,7 @@ pub struct Session {
     our_peer_id: PeerId,
     our_bitfield: Bitfield,
     piece_tracker: PieceTracker,
+    piece_store: Option<PieceStore>,
     peer_contexts: HashMap<PeerId, PeerContext>,
     event_rx: mpsc::Receiver<PeerEvent>,
     #[allow(dead_code)]
@@ -258,12 +250,14 @@ pub struct Session {
     config: SessionConfig,
     upload_bytes: HashMap<PeerId, u64>,
     tft_round: u64,
+    is_seed: bool,
 }
 
 impl Session {
     pub async fn new(
         config: SessionConfig,
         metainfo: Metainfo,
+        output_dir: Option<&Path>,
     ) -> Result<Self> {
         let dht = DhtClient::connect(&config.dht_endpoint).await?;
         let (event_tx, event_rx) = mpsc::channel(1024);
@@ -281,6 +275,14 @@ impl Session {
 
         let piece_tracker = PieceTracker::new(metainfo.clone());
 
+        let piece_store = if let Some(dir) = output_dir {
+            let mut store = PieceStore::new(metainfo.clone(), dir)?;
+            store.preallocate()?;
+            Some(store)
+        } else {
+            None
+        };
+
         Ok(Self {
             dht,
             cm,
@@ -288,12 +290,14 @@ impl Session {
             our_peer_id,
             our_bitfield,
             piece_tracker,
+            piece_store,
             peer_contexts: HashMap::new(),
             event_rx,
             event_tx,
             config,
             upload_bytes: HashMap::new(),
             tft_round: 0,
+            is_seed: false,
         })
     }
 
@@ -313,17 +317,75 @@ impl Session {
         &self.metainfo
     }
 
-    pub async fn download(&mut self) -> Result<Vec<u8>> {
+    pub async fn seed(&mut self, data_dir: &Path) -> Result<()> {
+        self.is_seed = true;
+
+        let total_len = self.metainfo.info.total_length;
+        let piece_count = self.metainfo.piece_count();
+        let piece_len = self.metainfo.info.piece_length;
+
+        let assembler = crate::storage::assembler::FileAssembler::new(&self.metainfo, data_dir);
+        let file_paths = assembler.file_paths(data_dir);
+
+        if file_paths.is_empty() {
+            return Err(BError::Session("no data files found".into()));
+        }
+
+        let first_file = &file_paths[0];
+        if !first_file.exists() {
+            return Err(BError::Session(format!(
+                "data file not found: {}",
+                first_file.display()
+            )));
+        }
+
+        let piece_store = PieceStore::open_existing(self.metainfo.clone(), data_dir)?;
+        self.piece_store = Some(piece_store);
+
+        for i in 0..piece_count {
+            let piece_data = self.read_piece_data(i as u32);
+
+            let piece_data = if piece_data.len() > total_len.saturating_sub(i * piece_len) {
+                let actual_len = total_len.saturating_sub(i * piece_len);
+                &piece_data[..actual_len]
+            } else {
+                &piece_data
+            };
+
+            self.piece_tracker.verify(i as u32, piece_data)?;
+            self.piece_tracker.mark_complete(i as u32);
+            self.our_bitfield.set(i);
+        }
+
+        let our_bitfield = Arc::new(std::sync::Mutex::new(self.our_bitfield.clone()));
+
+        self.cm
+            .start_listener(
+                self.config.peer_port,
+                self.metainfo.info_hash,
+                our_bitfield,
+            )
+            .await?;
+
+        let our_addr = PeerAddr::new(self.config.bind_addr, self.config.peer_port);
+        self.dht
+            .announce_peer(&self.metainfo.info_hash, &our_addr)
+            .await?;
+
+        tracing::info!("seeding {} pieces, waiting for peers...", piece_count);
+        self.run_event_loop_seed().await?;
+
+        Ok(())
+    }
+
+    pub async fn download(&mut self) -> Result<()> {
         let our_addr = PeerAddr::new(self.config.bind_addr, self.config.peer_port);
 
         self.dht
             .announce_peer(&self.metainfo.info_hash, &our_addr)
             .await?;
 
-        let peers = self
-            .dht
-            .get_peers(&self.metainfo.info_hash)
-            .await?;
+        let peers = self.dht.get_peers(&self.metainfo.info_hash).await?;
 
         let our_bitfield = Arc::new(std::sync::Mutex::new(self.our_bitfield.clone()));
 
@@ -345,10 +407,26 @@ impl Session {
                 .await?;
         }
 
-        self.run_event_loop().await
+        self.run_event_loop().await?;
+
+        tracing::info!(
+            "download complete: {}/{} pieces",
+            self.piece_tracker.completed_count(),
+            self.metainfo.piece_count()
+        );
+
+        Ok(())
     }
 
-    async fn run_event_loop(&mut self) -> Result<Vec<u8>> {
+    fn read_piece_data(&self, index: u32) -> Vec<u8> {
+        if let Some(ref store) = self.piece_store {
+            store.read_piece(index).unwrap_or_default()
+        } else {
+            self.piece_tracker.assemble(index)
+        }
+    }
+
+    async fn run_event_loop(&mut self) -> Result<()> {
         let mut tft_timer =
             tokio::time::interval(Duration::from_secs(10));
         let mut dht_timer = tokio::time::interval(Duration::from_secs(
@@ -400,7 +478,53 @@ impl Session {
         }
 
         self.cm.disconnect_all().await;
-        Ok(self.piece_tracker.take_data())
+        Ok(())
+    }
+
+    async fn run_event_loop_seed(&mut self) -> Result<()> {
+        let mut tft_timer =
+            tokio::time::interval(Duration::from_secs(10));
+        let mut dht_timer = tokio::time::interval(Duration::from_secs(
+            self.config.dht_refresh_interval_secs,
+        ));
+
+        tracing::info!("seed event loop started");
+        loop {
+            self.cm.drain_new_handles();
+
+            tokio::select! {
+                event = self.event_rx.recv() => {
+                    match event {
+                        Some(PeerEvent::HandshakeComplete(ctx)) => {
+                            let peer_id = ctx.peer_id;
+                            if !self.peer_contexts.contains_key(&peer_id) {
+                                self.peer_contexts.insert(peer_id, ctx);
+                            }
+                        }
+                        Some(PeerEvent::ReceivedMessage { peer_id, msg }) => {
+                            self.handle_peer_message(peer_id, msg).await;
+                        }
+                        Some(PeerEvent::Disconnected(addr)) => {
+                            self.handle_disconnected(addr).await;
+                        }
+                        None => break,
+                    }
+                }
+
+                _ = tft_timer.tick() => {
+                    self.run_tit_for_tat().await;
+                }
+
+                _ = dht_timer.tick() => {
+                    if let Err(e) = self.refresh_peers().await {
+                        tracing::warn!("DHT refresh failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        self.cm.disconnect_all().await;
+        Ok(())
     }
 
     async fn handle_peer_message(
@@ -422,7 +546,9 @@ impl Session {
                 if let Some(ctx) = self.peer_contexts.get_mut(&peer_id) {
                     ctx.peer_choking = false;
                 }
-                self.fill_pipeline(peer_id).await;
+                if !self.is_seed {
+                    self.fill_pipeline(peer_id).await;
+                }
             }
 
             Message::Interested => {
@@ -445,7 +571,8 @@ impl Session {
                             .increase_availability(std::iter::once(index as usize));
                         ctx.update_interest(&self.our_bitfield);
 
-                        if ctx.am_interested
+                        if !self.is_seed
+                            && ctx.am_interested
                             && !ctx.peer_choking
                             && self.piece_tracker.peer_pipeline_count(&peer_id)
                                 < self.config.pipeline_depth
@@ -472,7 +599,7 @@ impl Session {
                     ctx.peer_bitfield = bf;
                     ctx.update_interest(&self.our_bitfield);
 
-                    if ctx.am_interested {
+                    if ctx.am_interested && !self.is_seed {
                         let _ = self
                             .cm
                             .send_to(&peer_id, Message::Interested)
@@ -488,25 +615,27 @@ impl Session {
             Message::Request { index, begin, length } => {
                 if let Some(ctx) = self.peer_contexts.get(&peer_id) {
                     if !ctx.am_choking && self.our_bitfield.has(index as usize) {
-                        let data = self.piece_tracker.assemble(index);
+                        let data = self.read_piece_data(index);
                         let offset = begin as usize;
                         let end = (offset + length as usize).min(data.len());
                         let block = data[offset..end].to_vec();
 
-                        let _ = self
-                            .cm
-                            .send_to(
-                                &peer_id,
-                                Message::Piece {
-                                    index,
-                                    begin,
-                                    data: block,
-                                },
-                            )
-                            .await;
+                        if !block.is_empty() {
+                            let _ = self
+                                .cm
+                                .send_to(
+                                    &peer_id,
+                                    Message::Piece {
+                                        index,
+                                        begin,
+                                        data: block,
+                                    },
+                                )
+                                .await;
 
-                        *self.upload_bytes.entry(peer_id).or_default() +=
-                            length as u64;
+                            *self.upload_bytes.entry(peer_id).or_default() +=
+                                length as u64;
+                        }
                     }
                 }
             }
@@ -518,9 +647,22 @@ impl Session {
                 let is_complete = self.piece_tracker.store_block(index, begin, data);
 
                 if is_complete {
-                    match self.piece_tracker.verify_and_complete(index) {
-                        Ok(_data) => {
+                    let piece_data = self.piece_tracker.assemble(index);
+                    match self.piece_tracker.verify(index, &piece_data) {
+                        Ok(()) => {
+                            self.piece_tracker.mark_complete(index);
                             self.our_bitfield.set(index as usize);
+
+                            if let Some(ref mut store) = self.piece_store {
+                                if let Err(e) = store.write_piece(index, &piece_data) {
+                                    tracing::warn!(
+                                        "failed to write piece {} to disk: {}",
+                                        index,
+                                        e
+                                    );
+                                }
+                            }
+
                             let _ = self
                                 .cm
                                 .broadcast(Message::Have(index))
@@ -536,8 +678,9 @@ impl Session {
                     }
                 }
 
-                if self.piece_tracker.peer_pipeline_count(&peer_id)
-                    < self.config.pipeline_depth
+                if !self.is_seed
+                    && self.piece_tracker.peer_pipeline_count(&peer_id)
+                        < self.config.pipeline_depth
                 {
                     self.fill_pipeline(peer_id).await;
                 }
@@ -550,6 +693,10 @@ impl Session {
     }
 
     async fn fill_pipeline(&mut self, peer_id: PeerId) {
+        if self.is_seed {
+            return;
+        }
+
         let peer_bf = match self.peer_contexts.get(&peer_id) {
             Some(ctx) if !ctx.peer_choking && ctx.am_interested => {
                 ctx.peer_bitfield.clone()
@@ -630,7 +777,9 @@ impl Session {
             )
         });
 
-        for &id in interested.iter().take(4) {
+        let slots = self.config.upload_slots;
+
+        for &id in interested.iter().take(slots) {
             if let Some(ctx) = self.peer_contexts.get_mut(&id) {
                 if ctx.am_choking {
                     ctx.am_choking = false;
@@ -639,7 +788,7 @@ impl Session {
             }
         }
 
-        for &id in interested.iter().skip(4) {
+        for &id in interested.iter().skip(slots) {
             if let Some(ctx) = self.peer_contexts.get_mut(&id) {
                 if !ctx.am_choking {
                     ctx.am_choking = true;
@@ -652,9 +801,7 @@ impl Session {
             let choked: Vec<PeerId> = self
                 .peer_contexts
                 .iter()
-                .filter(|(_, ctx)| {
-                    ctx.peer_interested && ctx.am_choking
-                })
+                .filter(|(_, ctx)| ctx.peer_interested && ctx.am_choking)
                 .map(|(id, _)| *id)
                 .collect();
 

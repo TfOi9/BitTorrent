@@ -20,7 +20,19 @@ pub struct PieceStore {
 impl PieceStore {
     pub fn new(metainfo: Metainfo, output_dir: &Path) -> Result<Self> {
         let assembler = FileAssembler::new(&metainfo, output_dir);
-        create_output_files(&assembler, output_dir)?;
+        create_output_files(&assembler, output_dir, true)?;
+
+        Ok(Self {
+            metainfo,
+            assembler,
+            output_dir: output_dir.to_path_buf(),
+            written: HashSet::new(),
+        })
+    }
+
+    pub fn open_existing(metainfo: Metainfo, output_dir: &Path) -> Result<Self> {
+        let assembler = FileAssembler::new(&metainfo, output_dir);
+        create_output_files(&assembler, output_dir, false)?;
 
         Ok(Self {
             metainfo,
@@ -118,7 +130,7 @@ impl PieceStore {
     }
 }
 
-fn create_output_files(assembler: &FileAssembler, output_dir: &Path) -> Result<()> {
+fn create_output_files(assembler: &FileAssembler, output_dir: &Path, create_files: bool) -> Result<()> {
     let file_paths = assembler.file_paths(output_dir);
     for path in &file_paths {
         if let Some(parent) = path.parent() {
@@ -126,7 +138,9 @@ fn create_output_files(assembler: &FileAssembler, output_dir: &Path) -> Result<(
                 create_dir_all(parent).map_err(|e| BError::Io(e))?;
             }
         }
-        File::create(path).map_err(|e| BError::Io(e))?;
+        if create_files {
+            File::create(path).map_err(|e| BError::Io(e))?;
+        }
     }
     Ok(())
 }

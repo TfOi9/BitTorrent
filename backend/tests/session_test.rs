@@ -12,6 +12,18 @@ use backend::peer::connection::PeerContext;
 use backend::peer::message::Message;
 use backend::session::{Session, SessionConfig};
 
+fn helper_config(dht: &str, port: u16) -> SessionConfig {
+    SessionConfig {
+        dht_endpoint: dht.into(),
+        bind_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        peer_port: port,
+        max_peers: 5,
+        pipeline_depth: 3,
+        dht_refresh_interval_secs: 9999,
+        upload_slots: 4,
+    }
+}
+
 fn make_torrent_bytes(piece_count: usize) -> Vec<u8> {
     let piece_length: i64 = 32768;
     let total_length = piece_length as usize * piece_count;
@@ -24,30 +36,21 @@ fn make_torrent_bytes(piece_count: usize) -> Vec<u8> {
     }
 
     let mut bencode = Vec::new();
-    // d
     bencode.extend_from_slice(b"d");
-    // 8:announce11:http://t.co
     bencode.extend_from_slice(b"8:announce11:http://t.co");
-    // 13:creation datei0e
     bencode.extend_from_slice(b"13:creation datei0e");
-    // 4:infod
     bencode.extend_from_slice(b"4:infod");
-    // 6:lengthi<N>e
     bencode.extend_from_slice(b"6:lengthi");
     bencode.extend_from_slice(total_length.to_string().as_bytes());
     bencode.extend_from_slice(b"e");
-    // 4:name4:test
     bencode.extend_from_slice(b"4:name4:test");
-    // 12:piece lengthi<N>e
     bencode.extend_from_slice(b"12:piece lengthi");
     bencode.extend_from_slice(piece_length.to_string().as_bytes());
     bencode.extend_from_slice(b"e");
-    // 6:pieces<N>:
     bencode.extend_from_slice(b"6:pieces");
     bencode.extend_from_slice(pieces.len().to_string().as_bytes());
     bencode.extend_from_slice(b":");
     bencode.extend_from_slice(&pieces);
-    // ee
     bencode.extend_from_slice(b"ee");
     bencode
 }
@@ -74,6 +77,7 @@ fn test_session_config_defaults() {
     assert_eq!(config.max_peers, 50);
     assert_eq!(config.pipeline_depth, 5);
     assert_eq!(config.dht_refresh_interval_secs, 300);
+    assert_eq!(config.upload_slots, 4);
 }
 
 #[test]
@@ -86,12 +90,14 @@ fn test_session_config_custom() {
         max_peers: 10,
         pipeline_depth: 3,
         dht_refresh_interval_secs: 60,
+        upload_slots: 6,
     };
     assert_eq!(config.dht_endpoint, "http://192.168.1.1:6000");
     assert_eq!(config.bind_addr, bind_addr);
     assert_eq!(config.peer_port, 9999);
     assert_eq!(config.max_peers, 10);
     assert_eq!(config.pipeline_depth, 3);
+    assert_eq!(config.upload_slots, 6);
 }
 
 #[test]
@@ -171,15 +177,8 @@ fn test_choke_state_transitions() {
 #[ignore = "requires Go DHT sidecar running on localhost:50051"]
 async fn test_session_new_and_progress() {
     let metainfo = make_test_metainfo(2);
-    let config = SessionConfig {
-        dht_endpoint: "http://127.0.0.1:50051".into(),
-        bind_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        peer_port: 60001,
-        max_peers: 5,
-        pipeline_depth: 3,
-        dht_refresh_interval_secs: 9999,
-    };
-    let session = Session::new(config, metainfo).await.unwrap();
+    let config = helper_config("http://127.0.0.1:50051", 60001);
+    let session = Session::new(config, metainfo, None).await.unwrap();
     assert!((session.progress() - 0.0).abs() < f64::EPSILON);
     assert_eq!(session.metainfo().piece_count(), 2);
 }
@@ -189,15 +188,8 @@ async fn test_session_new_and_progress() {
 async fn test_session_info_hash() {
     let metainfo = make_test_metainfo(1);
     let expected_hash = metainfo.info_hash;
-    let config = SessionConfig {
-        dht_endpoint: "http://127.0.0.1:50051".into(),
-        bind_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        peer_port: 60003,
-        max_peers: 5,
-        pipeline_depth: 3,
-        dht_refresh_interval_secs: 9999,
-    };
-    let session = Session::new(config, metainfo).await.unwrap();
+    let config = helper_config("http://127.0.0.1:50051", 60003);
+    let session = Session::new(config, metainfo, None).await.unwrap();
     assert_eq!(*session.info_hash(), expected_hash);
 }
 
@@ -265,24 +257,15 @@ async fn test_session_download_full_flow() {
         .unwrap();
     }
 
-    let config = SessionConfig {
-        dht_endpoint: "http://127.0.0.1:50052".into(),
-        bind_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        peer_port: 60004,
-        max_peers: 5,
-        pipeline_depth: 3,
-        dht_refresh_interval_secs: 9999,
-    };
+    let config = helper_config("http://127.0.0.1:50052", 60004);
 
-    let mut session = Session::new(config, metainfo.clone()).await.unwrap();
+    let mut session = Session::new(config, metainfo.clone(), None).await.unwrap();
     let result =
         tokio::time::timeout(std::time::Duration::from_secs(30), session.download())
             .await;
 
     match result {
-        Ok(Ok(data)) => {
-            assert_eq!(data, expected_data, "downloaded data should match");
-        }
+        Ok(Ok(())) => {}
         Ok(Err(e)) => {
             panic!("download failed: {}", e);
         }
@@ -297,15 +280,8 @@ async fn test_session_download_full_flow() {
 #[tokio::test]
 async fn test_session_download_without_sidecar_fails() {
     let metainfo = make_test_metainfo(1);
-    let config = SessionConfig {
-        dht_endpoint: "http://127.0.0.1:19999".into(),
-        bind_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        peer_port: 60002,
-        max_peers: 5,
-        pipeline_depth: 3,
-        dht_refresh_interval_secs: 9999,
-    };
-    let result = Session::new(config, metainfo).await;
+    let config = helper_config("http://127.0.0.1:19999", 60002);
+    let result = Session::new(config, metainfo, None).await;
     assert!(result.is_err(), "should fail without DHT sidecar");
 }
 
