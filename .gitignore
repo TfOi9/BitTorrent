@@ -3,3 +3,4 @@ impl_docs/
 *.log
 temp/
 */target/
+opencode.json

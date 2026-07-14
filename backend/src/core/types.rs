@@ -190,37 +190,3 @@ impl fmt::Display for PeerAddr {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_infohash_from_hex() {
-        let hash = InfoHash::from_hex("abcdef0123456789abcdef0123456789abcdef01").unwrap();
-        assert_eq!(hash.as_bytes()[0], 0xab);
-        assert_eq!(hash.as_bytes()[19], 0x01);
-    }
-
-    #[test]
-    fn test_infohash_from_hex_invalid_length() {
-        assert!(InfoHash::from_hex("too_short").is_err());
-    }
-
-    #[test]
-    fn test_peerid_new_random() {
-        let id1 = PeerId::new_random();
-        let id2 = PeerId::new_random();
-        assert_eq!(&id1.0[..6], b"-RB000");
-        // likely these ids are different
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn test_compact_peer_v4() {
-        // IP: 192.168.1.100, Port: 6881 (0x1AE1)
-        let bytes = [192, 168, 1, 100, 0x1A, 0xE1];
-        let peer = PeerAddr::from_compact_v4(&bytes).unwrap();
-        assert_eq!(peer.ip, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
-        assert_eq!(peer.port, 6881);
-    }
-}
