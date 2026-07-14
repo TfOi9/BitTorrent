@@ -115,7 +115,7 @@ impl PieceTracker {
     fn pick_rarest(&self, peer_bitfield: &Bitfield) -> Option<u32> {
         let mut candidates: Vec<(u32, usize)> = peer_bitfield
             .complete_pieces()
-            .filter(|&i| matches!(self.pieces[i], PieceState::Pending))
+            .filter(|&i| matches!(self.pieces[i], PieceState::Pending | PieceState::Downloading { .. }))
             .map(|i| (i as u32, self.piece_availability[i]))
             .collect();
 
@@ -251,6 +251,7 @@ pub struct Session {
     upload_bytes: HashMap<PeerId, u64>,
     tft_round: u64,
     is_seed: bool,
+    pending_interested: std::collections::HashSet<PeerId>,
 }
 
 impl Session {
@@ -298,6 +299,7 @@ impl Session {
             upload_bytes: HashMap::new(),
             tft_round: 0,
             is_seed: false,
+            pending_interested: std::collections::HashSet::new(),
         })
     }
 
@@ -373,6 +375,7 @@ impl Session {
             .await?;
 
         tracing::info!("seeding {} pieces, waiting for peers...", piece_count);
+        tracing::info!("entering seed event loop (is_seed={})", self.is_seed);
         self.run_event_loop_seed().await?;
 
         Ok(())
@@ -385,8 +388,6 @@ impl Session {
             .announce_peer(&self.metainfo.info_hash, &our_addr)
             .await?;
 
-        let peers = self.dht.get_peers(&self.metainfo.info_hash).await?;
-
         let our_bitfield = Arc::new(std::sync::Mutex::new(self.our_bitfield.clone()));
 
         self.cm
@@ -397,14 +398,18 @@ impl Session {
             )
             .await?;
 
+        let peers = self.discover_peers_with_retry().await?;
+
         if !peers.is_empty() {
-            self.cm
+            let n = self
+                .cm
                 .connect_to_peers(
                     &peers,
                     self.metainfo.info_hash,
                     &self.our_bitfield,
                 )
                 .await?;
+            tracing::info!("connected to {}/{} peers", n, peers.len());
         }
 
         self.run_event_loop().await?;
@@ -416,6 +421,29 @@ impl Session {
         );
 
         Ok(())
+    }
+
+    async fn discover_peers_with_retry(&mut self) -> Result<Vec<PeerAddr>> {
+        for attempt in 1..=6 {
+            let raw = self.dht.get_peers(&self.metainfo.info_hash).await?;
+            tracing::info!("DHT raw peers: {:?}", raw.iter().map(|p| format!("{}:{}", p.ip, p.port)).collect::<Vec<_>>());
+            // Filter out our own address to avoid self-connection
+            let mut peers = raw;
+            peers.retain(|p| p.ip != self.config.bind_addr || p.port != self.config.peer_port);
+            tracing::info!(
+                "DHT get_peers attempt {}: found {} peers",
+                attempt,
+                peers.len()
+            );
+            if !peers.is_empty() {
+                return Ok(peers);
+            }
+            if attempt < 6 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+        tracing::warn!("DHT get_peers: no peers found after 6 attempts");
+        Ok(Vec::new())
     }
 
     fn read_piece_data(&self, index: u32) -> Vec<u8> {
@@ -432,22 +460,47 @@ impl Session {
         let mut dht_timer = tokio::time::interval(Duration::from_secs(
             self.config.dht_refresh_interval_secs,
         ));
+        let mut first_dht = true;
 
         loop {
-            self.cm.drain_new_handles();
+            self.cm.drain_new_handles(
+                &mut self.peer_contexts,
+                &mut self.pending_interested,
+            );
 
             tokio::select! {
                 event = self.event_rx.recv() => {
                     match event {
-                        Some(PeerEvent::HandshakeComplete(ctx)) => {
-                            let peer_id = ctx.peer_id;
-                            if !self.peer_contexts.contains_key(&peer_id) {
-                                self.peer_contexts.insert(peer_id, ctx);
-                            }
+                Some(PeerEvent::HandshakeComplete(ctx)) => {
+                    let peer_id = ctx.peer_id;
+                    if !self.peer_contexts.contains_key(&peer_id) {
+                        self.peer_contexts.insert(peer_id, ctx);
+                        if self.pending_interested.remove(&peer_id) {
+                            self.peer_contexts.get_mut(&peer_id).unwrap().peer_interested = true;
+                            tracing::info!("new peer registered (deferred Interested applied)");
+                        } else {
+                            tracing::info!("new peer registered");
                         }
-                        Some(PeerEvent::ReceivedMessage { peer_id, msg }) => {
-                            self.handle_peer_message(peer_id, msg).await;
+                    }
+                }
+                Some(PeerEvent::ReceivedMessage { peer_id, msg }) => {
+                    match &msg {
+                        crate::peer::message::Message::Bitfield(b) => {
+                            tracing::info!("recv bitfield: {} pieces", b.complete_pieces().count());
                         }
+                        crate::peer::message::Message::Interested => {
+                            tracing::info!("recv Interested");
+                        }
+                        crate::peer::message::Message::Unchoke => {
+                            tracing::info!("recv Unchoke");
+                        }
+                        crate::peer::message::Message::Piece { index, begin, .. } => {
+                            tracing::info!("recv Piece {}:{}", index, begin);
+                        }
+                        _ => {}
+                    }
+                    self.handle_peer_message(peer_id, msg).await;
+                }
                         Some(PeerEvent::Disconnected(addr)) => {
                             self.handle_disconnected(addr).await;
                         }
@@ -460,7 +513,9 @@ impl Session {
                 }
 
                 _ = dht_timer.tick() => {
-                    if let Err(e) = self.refresh_peers().await {
+                    if first_dht {
+                        first_dht = false;
+                    } else if let Err(e) = self.refresh_peers().await {
                         tracing::warn!("DHT refresh failed: {}", e);
                     }
                 }
@@ -487,20 +542,30 @@ impl Session {
         let mut dht_timer = tokio::time::interval(Duration::from_secs(
             self.config.dht_refresh_interval_secs,
         ));
+        let mut first_dht = true;
 
         tracing::info!("seed event loop started");
         loop {
-            self.cm.drain_new_handles();
+            self.cm.drain_new_handles(
+                &mut self.peer_contexts,
+                &mut self.pending_interested,
+            );
 
             tokio::select! {
                 event = self.event_rx.recv() => {
-                    match event {
-                        Some(PeerEvent::HandshakeComplete(ctx)) => {
-                            let peer_id = ctx.peer_id;
-                            if !self.peer_contexts.contains_key(&peer_id) {
-                                self.peer_contexts.insert(peer_id, ctx);
-                            }
+            match event {
+                Some(PeerEvent::HandshakeComplete(ctx)) => {
+                    let peer_id = ctx.peer_id;
+                    if !self.peer_contexts.contains_key(&peer_id) {
+                        self.peer_contexts.insert(peer_id, ctx);
+                        if self.pending_interested.remove(&peer_id) {
+                            self.peer_contexts.get_mut(&peer_id).unwrap().peer_interested = true;
+                            tracing::info!("new peer registered (deferred Interested applied)");
+                        } else {
+                            tracing::info!("new peer registered");
                         }
+                    }
+                }
                         Some(PeerEvent::ReceivedMessage { peer_id, msg }) => {
                             self.handle_peer_message(peer_id, msg).await;
                         }
@@ -516,7 +581,9 @@ impl Session {
                 }
 
                 _ = dht_timer.tick() => {
-                    if let Err(e) = self.refresh_peers().await {
+                    if first_dht {
+                        first_dht = false;
+                    } else if let Err(e) = self.refresh_peers().await {
                         tracing::warn!("DHT refresh failed: {}", e);
                     }
                 }
@@ -552,8 +619,11 @@ impl Session {
             }
 
             Message::Interested => {
+                tracing::info!("peer interested");
                 if let Some(ctx) = self.peer_contexts.get_mut(&peer_id) {
                     ctx.peer_interested = true;
+                } else {
+                    self.pending_interested.insert(peer_id);
                 }
             }
 
@@ -600,6 +670,7 @@ impl Session {
                     ctx.update_interest(&self.our_bitfield);
 
                     if ctx.am_interested && !self.is_seed {
+                        tracing::info!("sending Interested+Unchoke");
                         let _ = self
                             .cm
                             .send_to(&peer_id, Message::Interested)
@@ -635,7 +706,17 @@ impl Session {
 
                             *self.upload_bytes.entry(peer_id).or_default() +=
                                 length as u64;
+
+                            tracing::info!(
+                                "sent piece {} block {} len={}",
+                                index, begin, length
+                            );
                         }
+                    } else {
+                        tracing::info!(
+                            "ignored request piece={} (am_choking={}, has={})",
+                            index, ctx.am_choking, self.our_bitfield.has(index as usize)
+                        );
                     }
                 }
             }
@@ -704,6 +785,8 @@ impl Session {
             _ => return,
         };
 
+        tracing::info!("fill_pipeline: starting requests");
+
         while self.piece_tracker.peer_pipeline_count(&peer_id)
             < self.config.pipeline_depth
         {
@@ -762,6 +845,7 @@ impl Session {
     }
 
     async fn run_tit_for_tat(&mut self) {
+        tracing::info!("TFT round {}", self.tft_round);
         self.tft_round += 1;
 
         let mut interested: Vec<PeerId> = self
@@ -783,6 +867,7 @@ impl Session {
             if let Some(ctx) = self.peer_contexts.get_mut(&id) {
                 if ctx.am_choking {
                     ctx.am_choking = false;
+                    tracing::info!("TFT unchoke");
                     let _ = self.cm.send_to(&id, Message::Unchoke).await;
                 }
             }
@@ -815,13 +900,15 @@ impl Session {
     }
 
     async fn refresh_peers(&mut self) -> Result<()> {
+        tracing::info!("refresh_peers called (is_seed={})", self.is_seed);
         let our_addr = PeerAddr::new(self.config.bind_addr, self.config.peer_port);
 
         self.dht
             .announce_peer(&self.metainfo.info_hash, &our_addr)
             .await?;
 
-        let peers = self.dht.get_peers(&self.metainfo.info_hash).await?;
+        let mut peers = self.dht.get_peers(&self.metainfo.info_hash).await?;
+        peers.retain(|p| p.ip != self.config.bind_addr || p.port != self.config.peer_port);
 
         if !peers.is_empty() {
             self.cm

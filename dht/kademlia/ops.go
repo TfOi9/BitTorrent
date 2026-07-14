@@ -250,22 +250,37 @@ func (node *KademliaNode) GetPeers(infoHashHex string) ([]Peer, bool) {
 
 	logrus.Infof("[%s] GetPeers for info_hash %x", node.Addr, infoHash[:8])
 
-	// Check local peer store first.
+	// Collect all peers (local + remote), deduplicated by "ip:port".
+	peerSet := make(map[string]Peer)
+
+	// Seed with local peer store entries first.
 	node.peerStoreLock.RLock()
-	if peers, exists := node.peerStore[infoHash]; exists && len(peers) > 0 {
-		node.peerStoreLock.RUnlock()
-		return peers, true
+	if peers, exists := node.peerStore[infoHash]; exists {
+		for _, p := range peers {
+			key := fmt.Sprintf("%s:%d", p.IP, p.Port)
+			if _, ok := peerSet[key]; !ok {
+				peerSet[key] = p
+			}
+		}
 	}
 	node.peerStoreLock.RUnlock()
 
-	// Iterative lookup — same pattern as Get.
+	// Always perform iterative lookup to discover peers on other nodes.
 	shortlist := node.findClosestContacts(infoHash, K)
 	if len(shortlist) == 0 {
+		if len(peerSet) > 0 {
+			result := make([]Peer, 0, len(peerSet))
+			for _, p := range peerSet {
+				result = append(result, p)
+			}
+			logrus.Infof("[%s] GetPeers found %d peers (local only) for info_hash %x",
+				node.Addr, len(result), infoHash[:8])
+			return result, true
+		}
 		return nil, false
 	}
 
 	queried := make(map[string]bool)
-	peerSet := make(map[string]Peer) // "ip:port" → Peer, for dedup
 
 	for i := 0; i < 32; i++ {
 		candidates := node.getAlphaClosestContacts(shortlist, infoHash, queried)
@@ -332,17 +347,6 @@ func (node *KademliaNode) GetPeers(infoHashHex string) ([]Peer, bool) {
 			}
 		}
 
-		// Once we have any peers, return immediately.
-		if len(peerSet) > 0 {
-			result := make([]Peer, 0, len(peerSet))
-			for _, p := range peerSet {
-				result = append(result, p)
-			}
-			logrus.Infof("[%s] GetPeers found %d peers for info_hash %x",
-				node.Addr, len(result), infoHash[:8])
-			return result, true
-		}
-
 		// Merge newly discovered contacts into the shortlist.
 		for contacts := range foundContacts {
 			for _, c := range contacts {
@@ -355,6 +359,16 @@ func (node *KademliaNode) GetPeers(infoHashHex string) ([]Peer, bool) {
 		if node.isLimitReached(shortlist, queried, infoHash, K) {
 			break
 		}
+	}
+
+	if len(peerSet) > 0 {
+		result := make([]Peer, 0, len(peerSet))
+		for _, p := range peerSet {
+			result = append(result, p)
+		}
+		logrus.Infof("[%s] GetPeers found %d peers for info_hash %x",
+			node.Addr, len(result), infoHash[:8])
+		return result, true
 	}
 
 	return nil, false

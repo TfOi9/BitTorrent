@@ -141,7 +141,8 @@ impl Message {
                 Message::Have(index)
             }
             5 => {
-                Message::Bitfield(Bitfield::from_bytes(payload.to_vec(), 0))
+                let total = payload.len() * 8;
+                Message::Bitfield(Bitfield::from_bytes(payload.to_vec(), total))
             }
             6 => {
                 if payload.len() != 12 {

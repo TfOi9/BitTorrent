@@ -62,8 +62,6 @@ impl PeerLoopState {
 
     async fn run(&mut self) {
         loop {
-            let write_ready = !self.write_queue.is_empty();
-
             tokio::select! {
                 result = self.stream.readable() => {
                     if let Err(e) = self.handle_readable(result).await {
@@ -85,7 +83,7 @@ impl PeerLoopState {
                     }
                 }
 
-                result = self.stream.writable(), if write_ready => {
+                result = self.stream.writable(), if !self.write_queue.is_empty() => {
                     if let Err(e) = self.handle_writable(result).await {
                         if !self.is_fatal(&e) {
                             continue;
@@ -162,12 +160,6 @@ impl PeerLoopState {
     ) -> io::Result<()> {
         match cmd {
             Some(PeerCommand::SendMessage(msg)) => {
-                if !self.peer_interested && matches!(msg, Message::Request { .. }) {
-                    return Ok(());
-                }
-                if self.peer_choking && matches!(msg, Message::Request { .. }) {
-                    return Ok(());
-                }
                 self.write_queue.push(msg.encode());
                 Ok(())
             }

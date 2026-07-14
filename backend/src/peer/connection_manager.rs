@@ -69,6 +69,7 @@ impl ConnectionManager {
         info_hash: InfoHash,
         our_bitfield: &Bitfield,
     ) -> Result<usize> {
+        tracing::info!("connect_to_peers called with {} addresses", addrs.len());
         let available = self.config.max_peers.saturating_sub(self.peers.len());
         if available == 0 {
             return Ok(0);
@@ -124,6 +125,7 @@ impl ConnectionManager {
                 let event_tx = event_tx.clone();
                 let new_handles_tx = new_handles_tx.clone();
                 tokio::spawn(async move {
+                    tracing::info!("inbound connection from {}", peer_addr);
                     if let Err(e) = accept_one(
                         stream,
                         peer_addr.clone(),
@@ -135,7 +137,7 @@ impl ConnectionManager {
                     )
                     .await
                     {
-                        tracing::debug!(
+                        tracing::warn!(
                             "inbound connection from {} failed: {}",
                             peer_addr,
                             e
@@ -148,15 +150,24 @@ impl ConnectionManager {
         Ok(handle)
     }
 
-    pub fn drain_new_handles(&mut self) {
+    pub fn drain_new_handles(
+        &mut self,
+        peer_contexts: &mut std::collections::HashMap<PeerId, PeerContext>,
+        pending_interested: &mut std::collections::HashSet<PeerId>,
+    ) {
         while let Ok(new) = self.new_handles_rx.try_recv() {
+            tracing::info!("drain_new_handles: registering new peer");
             if self.peers.len() >= self.config.max_peers {
                 let _ = new.handle.cmd_tx.send(PeerCommand::Disconnect);
                 continue;
             }
-            let _ = self
-                .event_tx
-                .send(PeerEvent::HandshakeComplete(new.ctx));
+            let peer_id = new.ctx.peer_id;
+            let mut ctx = new.ctx;
+            if pending_interested.remove(&peer_id) {
+                ctx.peer_interested = true;
+                tracing::info!("drain: applied deferred Interested");
+            }
+            peer_contexts.insert(peer_id, ctx);
             self.peers.insert(new.peer_id, new.handle);
         }
     }
@@ -225,6 +236,7 @@ impl ConnectionManager {
         info_hash: InfoHash,
         our_bitfield: &Bitfield,
     ) -> Result<()> {
+        tracing::info!("connecting to {}...", addr);
         let stream = timeout(
             Duration::from_secs(self.config.connect_timeout_secs),
             TcpStream::connect(addr.to_socket_string()),
@@ -237,6 +249,8 @@ impl ConnectionManager {
 
         let remote_peer_id =
             Handshake::perform(&mut stream, info_hash, self.our_peer_id).await?;
+
+        tracing::info!("handshake complete with {}", addr);
 
         let bitfield_msg = Message::Bitfield(our_bitfield.clone());
         stream
@@ -308,6 +322,9 @@ async fn accept_one(
         },
         ctx,
     });
+    tracing::info!("accept_one: sent NewPeerHandle");
+
+    tracing::info!("starting peer loop for {}", peer_addr);
 
     run_peer_loop(stream, cmd_rx, event_tx, peer_addr, remote_peer_id).await;
 
